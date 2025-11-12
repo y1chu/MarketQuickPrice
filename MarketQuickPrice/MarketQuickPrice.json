@@ -1,0 +1,9 @@
+{
+    "Author": "Aki",
+    "Name": "Market Quick Price",
+    "Punchline": "Quick price lookup via Universalis.",
+    "Description": "Type /mqp <item> to see the lowest listing on your world.",
+    "InternalName": "MarketQuickPrice",
+    "ApplicableVersion": "any",
+    "DalamudApiLevel": 13
+}
