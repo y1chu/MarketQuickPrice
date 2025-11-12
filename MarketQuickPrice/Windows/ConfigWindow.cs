@@ -1,7 +1,7 @@
-using System;
-using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
+using System;
+using System.Numerics;
 
 namespace MarketQuickPrice.Windows;
 
@@ -22,30 +22,7 @@ public class ConfigWindow : Window, IDisposable
 
     public override void Draw()
     {
-        // Default World
-        var worldBuf = configuration.DefaultWorld ?? string.Empty;
-        if (ImGui.InputText("Price Check World (blank = current)", ref worldBuf, 32))
-        {
-            configuration.DefaultWorld = worldBuf.Trim();
-            configuration.Save();
-        }
-        ImGui.SameLine();
-        if (ImGui.Button("Clear"))
-        {
-            configuration.DefaultWorld = string.Empty;
-            configuration.Save();
-        }
-
-        ImGui.Spacing();
-
-        // Throttle
-        var throttle = configuration.MinSecondsBetweenCalls;
-        if (ImGui.SliderInt("Min seconds between calls", ref throttle, 1, 30))
-        {
-            configuration.MinSecondsBetweenCalls = Math.Clamp(throttle, 1, 30);
-            configuration.Save();
-        }
-
+        ImGui.TextWrapped("Preferred world selection now lives in the main window search panel.");
         ImGui.Spacing();
 
         var cap = configuration.HistoryCapacity;

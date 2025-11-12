@@ -26,6 +26,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IChatGui Chat { get; private set; } = null!;
 
     private const string CommandName = "/mqp";
+    private const int LookupCooldownSeconds = 2;
 
     public Configuration Configuration { get; init; }
 
@@ -80,28 +81,50 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (string.IsNullOrWhiteSpace(args))
         {
-            Chat.Print("Usage: /mqp <item name>");
+            Chat.Print("[MQP] Opening the main window. Use the search box there to look up an item.");
+            MainWindow.IsOpen = true;
             return;
         }
 
-        if ((DateTime.UtcNow - lastCall).TotalSeconds < Math.Max(1, Configuration.MinSecondsBetweenCalls))
+        if (!TryBeginLookup(args, out var error))
         {
-            Chat.Print("[MQP] Please wait a moment before querying again.");
-            return;
+            Chat.Print($"[MQP] {error}");
+        }
+    }
+
+    internal bool TryBeginLookup(string? rawQuery, out string errorMessage)
+    {
+        errorMessage = string.Empty;
+        var query = rawQuery?.Trim() ?? string.Empty;
+
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            errorMessage = "Please enter an item name.";
+            return false;
         }
 
-        var item = FindItem(args);
+        var minSeconds = Math.Max(1, LookupCooldownSeconds);
+        var sinceLast = (DateTime.UtcNow - lastCall).TotalSeconds;
+        if (sinceLast < minSeconds)
+        {
+            var remaining = Math.Max(1, (int)Math.Ceiling(minSeconds - sinceLast));
+            errorMessage = $"Please wait {remaining} more second(s) before querying again.";
+            return false;
+        }
+
+        var item = FindItem(query);
 
         if (!item.HasValue)
         {
-            Chat.Print($"[MQP] Couldn't find an item named '{args}'.");
-            return;
+            errorMessage = $"Couldn't find an item named '{query}'.";
+            return false;
         }
 
         lastCall = DateTime.UtcNow;
 
         _ = QueryMarketAsync(item.Value.RowId, item.Value.Name.ToString());
         MainWindow.IsOpen = true;
+        return true;
     }
 
     private Item? FindItem(string query)
