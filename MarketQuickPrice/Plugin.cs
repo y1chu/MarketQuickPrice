@@ -4,6 +4,7 @@ using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using MarketQuickPrice.Windows;
+using MarketQuickPrice.Data;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -40,6 +41,15 @@ public sealed class Plugin : IDalamudPlugin
     internal record MarketResult(string ItemName, string World, long Lowest, long LastUploadMs);
     internal readonly List<MarketResult> History = new();
     internal MarketResult? LastResult { get; set; }
+
+    private enum LookupTargetType
+    {
+        World,
+        DataCenter,
+        Region
+    }
+
+    private readonly record struct LookupTarget(LookupTargetType Type, string Identifier, string Label);
 
     public Plugin()
     {
@@ -86,13 +96,13 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (!TryBeginLookup(args, out var error))
+        if (!TryBeginLookup(args, out var error, LookupScope.SpecificWorld))
         {
             Chat.Print($"[MQP] {error}");
         }
     }
 
-    internal bool TryBeginLookup(string? rawQuery, out string errorMessage)
+    internal bool TryBeginLookup(string? rawQuery, out string errorMessage, LookupScope? scopeOverride = null)
     {
         errorMessage = string.Empty;
         var query = rawQuery?.Trim() ?? string.Empty;
@@ -121,8 +131,9 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         lastCall = DateTime.UtcNow;
+        var scope = scopeOverride ?? LookupScope.SpecificWorld;
 
-        _ = QueryMarketAsync(item.Value.RowId, item.Value.Name.ToString());
+        _ = QueryMarketAsync(item.Value.RowId, item.Value.Name.ToString(), scope);
         MainWindow.IsOpen = true;
         return true;
     }
@@ -176,39 +187,35 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private async Task QueryMarketAsync(uint itemId, string itemName)
+    private async Task QueryMarketAsync(uint itemId, string itemName, LookupScope scope)
     {
         try
         {
-            var world = !string.IsNullOrWhiteSpace(Configuration.DefaultWorld)
-                ? Configuration.DefaultWorld
-                : (ClientState.LocalPlayer is { } lp && lp.CurrentWorld.IsValid
-                    ? lp.CurrentWorld.Value.Name.ToString()
-                    : "Unknown");
+            var targets = BuildLookupTargets(scope);
+            var targetSummary = string.Join(", ", targets.Select(t => t.Label));
 
-            var url = $"https://universalis.app/api/v2/{Uri.EscapeDataString(world)}/{itemId}?listings=10";
-            using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            req.Headers.UserAgent.ParseAdd("Dalamud-MarketQuickPrice/1.0");
+            MarketResult? bestResult = null;
 
-            using var res = await http.SendAsync(req);
-            res.EnsureSuccessStatusCode();
-
-            var json = await res.Content.ReadAsStringAsync();
-            var data = JsonSerializer.Deserialize<UniversalisResp>(json,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-
-            if (data?.listings is null || data.listings.Count == 0)
+            foreach (var target in targets)
             {
-                Chat.Print($"[MQP] No market listings for {itemName} on {world}.");
+                var result = await QueryMarketForTargetAsync(itemId, itemName, target);
+                if (result is null)
+                    continue;
+
+                if (bestResult is null || result.Lowest < bestResult.Lowest)
+                    bestResult = result;
+            }
+
+            if (bestResult is null)
+            {
+                Chat.Print($"[MQP] No market listings for {itemName} in {targetSummary}.");
                 return;
             }
 
-            var lowest = data.listings.MinBy(l => l.pricePerUnit)!;
+            LastResult = bestResult;
+            AddToHistory(bestResult);
 
-            LastResult = new MarketResult(itemName, world, lowest.pricePerUnit, data.lastUploadTime);
-            AddToHistory(LastResult);
-
-            Chat.Print($"[MQP] {itemName} @ {world}: {lowest.pricePerUnit:n0} gil (latest)");
+            Chat.Print($"[MQP] {itemName} @ {bestResult.World}: {bestResult.Lowest:n0} gil (latest)");
             MainWindow.IsOpen = true;
         }
         catch (Exception ex)
@@ -217,6 +224,115 @@ public sealed class Plugin : IDalamudPlugin
             Log.Error(ex, "QueryMarketAsync failed");
         }
     }
+
+    private async Task<MarketResult?> QueryMarketForTargetAsync(uint itemId, string itemName, LookupTarget target)
+    {
+        var url = $"https://universalis.app/api/v2/{Uri.EscapeDataString(target.Identifier)}/{itemId}?listings=10";
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.UserAgent.ParseAdd("Dalamud-MarketQuickPrice/1.0");
+
+        using var res = await http.SendAsync(req);
+        res.EnsureSuccessStatusCode();
+
+        var json = await res.Content.ReadAsStringAsync();
+        var data = JsonSerializer.Deserialize<UniversalisResp>(json,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        if (data?.listings is null || data.listings.Count == 0)
+            return null;
+
+        var lowest = data.listings.MinBy(l => l.pricePerUnit)!;
+        var worldLabel = target.Type == LookupTargetType.World
+            ? target.Label
+            : $"{lowest.worldName} [{target.Label}]";
+
+        return new MarketResult(itemName, worldLabel, lowest.pricePerUnit, data.lastUploadTime);
+    }
+
+    private IReadOnlyList<LookupTarget> BuildLookupTargets(LookupScope scope)
+    {
+        return scope.Kind switch
+        {
+            LookupScopeKind.CurrentDataCenter => TryGetCurrentDataCenterTarget(out var dcTarget)
+                ? new[] { dcTarget }
+                : new[] { CreateWorldTarget(GetPreferredWorldName()) },
+            LookupScopeKind.CurrentRegion => TryGetCurrentRegionTarget(out var regionTarget)
+                ? new[] { regionTarget }
+                : new[] { CreateWorldTarget(GetPreferredWorldName()) },
+            LookupScopeKind.CustomRegions => BuildCustomRegionTargets(scope.CustomRegions),
+            _ => new[] { CreateWorldTarget(GetPreferredWorldName()) }
+        };
+    }
+
+    private IReadOnlyList<LookupTarget> BuildCustomRegionTargets(IReadOnlyList<string>? regions)
+    {
+        if (regions is null || regions.Count == 0)
+            return new[] { CreateWorldTarget(GetPreferredWorldName()) };
+
+        var list = new List<LookupTarget>();
+        foreach (var name in regions)
+        {
+            if (!WorldRegions.TryGetRegionByName(name, out var region))
+                continue;
+
+            if (list.Any(t => string.Equals(t.Identifier, region.ApiIdentifier, StringComparison.OrdinalIgnoreCase)))
+                continue;
+
+            list.Add(CreateRegionTarget(region));
+        }
+
+        return list.Count > 0 ? list : new[] { CreateWorldTarget(GetPreferredWorldName()) };
+    }
+
+    private bool TryGetCurrentDataCenterTarget(out LookupTarget target)
+    {
+        target = default;
+        var currentWorld = GetCurrentWorldName();
+        if (currentWorld is null)
+            return false;
+
+        if (!WorldRegions.TryGetWorldInfo(currentWorld, out var region, out var dataCenter))
+            return false;
+
+        target = CreateDataCenterTarget(dataCenter, region);
+        return true;
+    }
+
+    private bool TryGetCurrentRegionTarget(out LookupTarget target)
+    {
+        target = default;
+        var currentWorld = GetCurrentWorldName();
+        if (currentWorld is null)
+            return false;
+
+        if (!WorldRegions.TryGetWorldInfo(currentWorld, out var region, out _))
+            return false;
+
+        target = CreateRegionTarget(region);
+        return true;
+    }
+
+    private LookupTarget CreateWorldTarget(string world)
+        => new(LookupTargetType.World, world, world);
+
+    private LookupTarget CreateDataCenterTarget(DataCenterInfo dataCenter, RegionInfo region)
+        => new(LookupTargetType.DataCenter, dataCenter.ApiIdentifier, $"{dataCenter.Name} ({region.Name})");
+
+    private LookupTarget CreateRegionTarget(RegionInfo region)
+        => new(LookupTargetType.Region, region.ApiIdentifier, region.Name);
+
+    private string GetPreferredWorldName()
+    {
+        if (!string.IsNullOrWhiteSpace(Configuration.DefaultWorld))
+            return Configuration.DefaultWorld;
+
+        return GetCurrentWorldName() ?? "Unknown";
+    }
+
+    private string? GetCurrentWorldName()
+        => ClientState.LocalPlayer is { } lp && lp.CurrentWorld.IsValid
+            ? lp.CurrentWorld.Value.Name.ToString()
+            : null;
 
     public void ToggleConfigUi() => ConfigWindow.Toggle();
     public void ToggleMainUi() => MainWindow.Toggle();
