@@ -6,5 +6,6 @@
     "InternalName": "MarketQuickPrice",
     "ApplicableVersion": "any",
     "Tags": ["marketboard", "price", "universalis"],
+    "IconUrl": "https://github.com/y1chu/TestPlugin/blob/master/MarketQuickPrice/images/icon.png",
     "DalamudApiLevel": 13
 }
