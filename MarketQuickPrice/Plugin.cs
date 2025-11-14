@@ -90,6 +90,7 @@ public sealed class Plugin : IDalamudPlugin
         MainWindow.Dispose();
 
         CommandManager.RemoveHandler(CommandName);
+        Configuration.Save();
     }
 
     private void OnCommand(string command, string args)

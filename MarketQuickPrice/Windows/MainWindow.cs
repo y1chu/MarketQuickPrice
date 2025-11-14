@@ -24,18 +24,28 @@ public class MainWindow : Window, IDisposable
     private readonly string[] regionNames;
     private readonly bool[] customRegionSelection;
     private int cheapestScopeIndex = (int)LookupScopeKind.CurrentDataCenter;
+    private Vector2 trackedWindowSize;
+    private bool sizeDirty;
+    private DateTime sizeDirtySince;
+    private const float SizeChangeThreshold = 0.5f;
+    private static readonly TimeSpan SizeSaveDelay = TimeSpan.FromMilliseconds(400);
 
     public MainWindow(Plugin plugin)
-        : base("Market Quick Price##MQP_Main", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
+        : base("Market Quick Price##MQP_Main")
     {
-        Size = new Vector2(380, 160);
+        var initialSize = ResolveWindowSize(plugin.Configuration.MainWindowSize, new Vector2(380, 160));
+        Size = initialSize;
         SizeCondition = ImGuiCond.Appearing;
+        trackedWindowSize = initialSize;
         this.plugin = plugin;
-        worldPicker = new WorldPickerPopup();
+        worldPicker = new WorldPickerPopup(plugin.Configuration);
         preferredWorld = plugin.Configuration.DefaultWorld ?? string.Empty;
         regionNames = WorldRegions.All.Select(r => r.Name).ToArray();
         customRegionSelection = new bool[regionNames.Length];
     }
+
+    private static Vector2 ResolveWindowSize(Vector2 storedSize, Vector2 fallback)
+        => storedSize.X > 0 && storedSize.Y > 0 ? storedSize : fallback;
 
     private LookupScope BuildCheapestLookupScope(IReadOnlyList<string> selectedRegions)
     {
@@ -72,10 +82,20 @@ public class MainWindow : Window, IDisposable
         };
     }
 
-    public void Dispose() { }
+    public void Dispose()
+        => SaveWindowSizeIfNeeded(true);
+
+    public override void OnClose()
+    {
+        SaveWindowSizeIfNeeded(true);
+        base.OnClose();
+    }
 
     public override void Draw()
     {
+        TrackWindowSizeChange();
+        SaveWindowSizeIfNeeded();
+
         ImGui.TextWrapped("Use the search box to look up an item. The /mqp command still works if you need it.");
         ImGui.Spacing();
 
@@ -289,5 +309,30 @@ public class MainWindow : Window, IDisposable
 
         plugin.Configuration.DefaultWorld = normalized;
         plugin.Configuration.Save();
+    }
+
+    private void TrackWindowSizeChange()
+    {
+        var currentSize = ImGui.GetWindowSize();
+        if (Vector2.DistanceSquared(currentSize, trackedWindowSize) <= SizeChangeThreshold * SizeChangeThreshold)
+            return;
+
+        trackedWindowSize = currentSize;
+        Size = currentSize;
+        plugin.Configuration.MainWindowSize = currentSize;
+        sizeDirtySince = DateTime.UtcNow;
+        sizeDirty = true;
+    }
+
+    private void SaveWindowSizeIfNeeded(bool force = false)
+    {
+        if (!sizeDirty)
+            return;
+
+        if (!force && (DateTime.UtcNow - sizeDirtySince) < SizeSaveDelay)
+            return;
+
+        plugin.Configuration.Save();
+        sizeDirty = false;
     }
 }

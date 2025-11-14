@@ -8,6 +8,7 @@ namespace MarketQuickPrice.Windows;
 
 public sealed class WorldPickerPopup
 {
+    private readonly Configuration configuration;
     private readonly IReadOnlyList<RegionInfo> regions = WorldRegions.All;
     private readonly string popupId;
 
@@ -19,11 +20,22 @@ public sealed class WorldPickerPopup
     private Vector2 windowSize = new(480, 380);
     private static readonly Vector2 MinSize = new(360, 260);
     private static readonly Vector2 MaxSize = new(900, 700);
+    private Vector2 trackedWindowSize;
+    private bool sizeDirty;
+    private DateTime sizeDirtySince;
+    private const float SizeChangeThreshold = 0.5f;
+    private static readonly TimeSpan SizeSaveDelay = TimeSpan.FromMilliseconds(400);
 
-    public WorldPickerPopup(string popupId = "MQP_WorldPicker")
+    public WorldPickerPopup(Configuration configuration, string popupId = "MQP_WorldPicker")
     {
+        this.configuration = configuration;
         this.popupId = popupId;
+        windowSize = ResolveWindowSize(configuration.WorldPickerSize, windowSize);
+        trackedWindowSize = windowSize;
     }
+
+    private static Vector2 ResolveWindowSize(Vector2 stored, Vector2 fallback)
+        => stored.X > 0 && stored.Y > 0 ? stored : fallback;
 
     public void Open() => isOpen = true;
 
@@ -39,10 +51,12 @@ public sealed class WorldPickerPopup
         if (!ImGui.Begin(title, ref isOpen, ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoDocking))
         {
             ImGui.End();
+            SaveWindowSizeIfNeeded(!isOpen);
             return;
         }
 
         windowSize = ImGui.GetWindowSize();
+        TrackWindowSizeChange();
 
         ImGui.TextUnformatted("Select a world");
         ImGui.Separator();
@@ -85,6 +99,7 @@ public sealed class WorldPickerPopup
             isOpen = false;
 
         ImGui.End();
+        SaveWindowSizeIfNeeded(!isOpen);
     }
 
     private void DrawWorldButtons(IReadOnlyList<string> worlds, string selectedWorld, Action<string> onWorldChosen)
@@ -114,5 +129,28 @@ public sealed class WorldPickerPopup
             if (isSelected)
                 ImGui.PopStyleColor(3);
         }
+    }
+
+    private void TrackWindowSizeChange()
+    {
+        if (Vector2.DistanceSquared(windowSize, trackedWindowSize) <= SizeChangeThreshold * SizeChangeThreshold)
+            return;
+
+        trackedWindowSize = windowSize;
+        configuration.WorldPickerSize = windowSize;
+        sizeDirty = true;
+        sizeDirtySince = DateTime.UtcNow;
+    }
+
+    private void SaveWindowSizeIfNeeded(bool force = false)
+    {
+        if (!sizeDirty)
+            return;
+
+        if (!force && (DateTime.UtcNow - sizeDirtySince) < SizeSaveDelay)
+            return;
+
+        configuration.Save();
+        sizeDirty = false;
     }
 }
