@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Dalamud plugin",
+      "type": "shell",
+      "command": "dotnet",
+      "args": [ "build", "-c", "Debug" ],
+      "group": "build",
+      "problemMatcher": "$msCompile"
+    }
+  ]
+}
