@@ -1,4 +1,6 @@
 using Dalamud.Game.Command;
+using Dalamud.Game.Gui.ContextMenu;
+using Dalamud.Game.Inventory;
 using Dalamud.Interface.Windowing;
 using Dalamud.IoC;
 using Dalamud.Plugin;
@@ -25,6 +27,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
     [PluginService] internal static IChatGui Chat { get; private set; } = null!;
+    [PluginService] internal static IContextMenu ContextMenu { get; private set; } = null!;
 
     private const string CommandName = "/mqp";
     private const int LookupCooldownSeconds = 2;
@@ -69,6 +72,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.Draw += WindowSystem.Draw;
         PluginInterface.UiBuilder.OpenConfigUi += ToggleConfigUi;
         PluginInterface.UiBuilder.OpenMainUi += ToggleMainUi;
+        ContextMenu.OnMenuOpened += OnMenuOpened;
 
         Log.Information($"===A cool log message from {PluginInterface.Manifest.Name}===");
     }
@@ -78,6 +82,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.Draw -= WindowSystem.Draw;
         PluginInterface.UiBuilder.OpenConfigUi -= ToggleConfigUi;
         PluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
+        ContextMenu.OnMenuOpened -= OnMenuOpened;
 
         WindowSystem.RemoveAllWindows();
 
@@ -100,6 +105,42 @@ public sealed class Plugin : IDalamudPlugin
         {
             Chat.Print($"[MQP] {error}");
         }
+    }
+
+    private void OnMenuOpened(IMenuOpenedArgs args)
+    {
+        if (args.MenuType != ContextMenuType.Inventory)
+            return;
+
+        if (args.Target is not MenuTargetInventory target)
+            return;
+
+        if (target.TargetItem is not GameInventoryItem item || item.BaseItemId == 0)
+            return;
+
+        var row = FindItem(item.BaseItemId);
+        if (!row.HasValue)
+            return;
+
+        var itemName = row.Value.Name.ToString();
+
+        if (string.IsNullOrWhiteSpace(itemName))
+            return;
+
+        args.AddMenuItem(new MenuItem
+        {
+            Name = "Check Price with MQP",
+            OnClicked = _ => BeginContextLookup(itemName)
+        });
+    }
+
+    private void BeginContextLookup(string itemName)
+    {
+        if (TryBeginLookup(itemName, out var error, LookupScope.SpecificWorld))
+            return;
+
+        if (!string.IsNullOrEmpty(error))
+            Chat.Print($"[MQP] {error}");
     }
 
     internal bool TryBeginLookup(string? rawQuery, out string errorMessage, LookupScope? scopeOverride = null)
@@ -165,6 +206,20 @@ public sealed class Plugin : IDalamudPlugin
             var name = row.Name.ToString();
             if (!string.IsNullOrEmpty(name) &&
                 name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
+                return row;
+        }
+
+        return null;
+    }
+
+    private Item? FindItem(uint rowId)
+    {
+        var sheet = DataManager.GetExcelSheet<Item>();
+        if (sheet == null) return null;
+
+        foreach (var row in sheet)
+        {
+            if (row.RowId == rowId)
                 return row;
         }
 
