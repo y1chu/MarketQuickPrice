@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Textures;
 using Dalamud.Interface.Windowing;
 using MarketQuickPrice.Data;
 
@@ -21,6 +22,8 @@ public class MainWindow : Window, IDisposable
     private const float PreferredWorldInputWidth = 220f;
     private const float PreferredWorldButtonWidth = 110f;
     private const float PreferredWorldPopupButtonWidth = 150f;
+    private const float FindCheapestButtonWidth = PreferredWorldPopupButtonWidth + 40f;
+    private const float ResultIconSize = 72f;
     private readonly string[] regionNames;
     private readonly bool[] customRegionSelection;
     private int cheapestScopeIndex = (int)LookupScopeKind.CurrentDataCenter;
@@ -100,14 +103,26 @@ public class MainWindow : Window, IDisposable
         ImGui.Spacing();
 
         var triggered = false;
-        ImGui.PushItemWidth(-110);
+        var availableWidth = ImGui.GetContentRegionAvail().X;
+        var spacing = ImGui.GetStyle().ItemSpacing.X;
+        var inputWidth = Math.Max(0f, availableWidth - FindCheapestButtonWidth - spacing);
+        ImGui.PushItemWidth(inputWidth);
         var submitted = ImGui.InputText("##mqp_item_search", ref itemSearch, SearchInputMaxLength, ImGuiInputTextFlags.EnterReturnsTrue);
         ImGui.PopItemWidth();
         triggered |= submitted;
 
+        var selectedRegions = GetSelectedCustomRegions();
+        var scopeKind = (LookupScopeKind)cheapestScopeIndex;
+        var hasName = !string.IsNullOrWhiteSpace(itemSearch);
+        var selectionValid = scopeKind != LookupScopeKind.CustomRegions || selectedRegions.Count > 0;
+        var canRunCheapest = hasName && selectionValid;
+
         ImGui.SameLine();
-        if (ImGui.Button("Search", new Vector2(100, 0)))
-            triggered = true;
+        if (!canRunCheapest) ImGui.BeginDisabled();
+        var findCheapestPressed = ImGui.Button("Find cheapest", new Vector2(FindCheapestButtonWidth, 0));
+        if (!canRunCheapest) ImGui.EndDisabled();
+        if (findCheapestPressed)
+            RunFindCheapest(selectedRegions);
 
         if (triggered)
         {
@@ -161,7 +176,11 @@ public class MainWindow : Window, IDisposable
                     ImGui.TableNextColumn();
                     var when = DateTimeOffset.FromUnixTimeMilliseconds(h.LastUploadMs).LocalDateTime;
                     if (ImGui.Selectable($"{when:g}##when{i}", false, ImGuiSelectableFlags.SpanAllColumns))
+                    {
                         plugin.LastResult = h;
+                        if (!string.IsNullOrWhiteSpace(h.ItemName))
+                            ImGui.SetClipboardText(h.ItemName);
+                    }
 
                     ImGui.TableNextColumn();
                     ImGui.TextUnformatted(h.ItemName);
@@ -196,13 +215,84 @@ public class MainWindow : Window, IDisposable
 
         ImGui.TextUnformatted("Current result");
         ImGui.Separator();
-        ImGui.TextUnformatted($"{r.ItemName} — {r.World}");
-        ImGui.TextUnformatted($"Lowest: {r.Lowest:n0} gil");
-        var now = DateTimeOffset.FromUnixTimeMilliseconds(r.LastUploadMs).LocalDateTime;
-        ImGui.TextUnformatted($"Last updated: {now:g}");
+        DrawCurrentResultDetails(r);
+    }
+
+    private void DrawCurrentResultDetails(Plugin.MarketResult result)
+    {
+        if (!ImGui.BeginTable("mqp_current_result", 2, ImGuiTableFlags.SizingStretchProp))
+            return;
+
+        ImGui.TableSetupColumn("info", ImGuiTableColumnFlags.WidthStretch);
+        ImGui.TableSetupColumn("icon", ImGuiTableColumnFlags.WidthFixed, ResultIconSize + 12f);
+
+        ImGui.TableNextRow();
+        ImGui.TableNextColumn();
+        DrawResultInfoColumn(result);
+
+        ImGui.TableNextColumn();
+        DrawResultIconColumn(result);
+
+        ImGui.EndTable();
+    }
+
+    private void DrawResultInfoColumn(Plugin.MarketResult result)
+    {
+        ImGui.TextUnformatted($"{result.ItemName} @ {result.World}");
+        ImGui.TextUnformatted($"Lowest: {result.Lowest:n0} gil");
+        var updated = DateTimeOffset.FromUnixTimeMilliseconds(result.LastUploadMs).LocalDateTime;
+        ImGui.TextUnformatted($"Last updated: {updated:g}");
+        ImGui.TextUnformatted($"Listings: {result.TotalListings:n0} ({result.TotalListedQuantity:n0} items)");
+
+        if (result.LatestSale is { } sale)
+        {
+            var saleTime = DateTimeOffset.FromUnixTimeSeconds(sale.Timestamp).LocalDateTime;
+            ImGui.TextUnformatted($"Latest sale: {sale.Quantity:n0} @ {sale.PricePerUnit:n0} gil ({saleTime:g})");
+        }
+        else
+        {
+            ImGui.TextUnformatted("Latest sale: No data");
+        }
+
+        if (result.DaySalesQuantity > 0)
+        {
+            var saleWord = result.DaySalesCount == 1 ? "sale" : "sales";
+            ImGui.TextUnformatted($"Sold (24h): {result.DaySalesQuantity:n0} items across {result.DaySalesCount:n0} {saleWord}");
+        }
+        else
+        {
+            ImGui.TextUnformatted("Sold (24h): No recorded sales");
+        }
 
         ImGui.Spacing();
         if (ImGui.Button("Settings")) plugin.ToggleConfigUi();
+    }
+
+    private void DrawResultIconColumn(Plugin.MarketResult result)
+    {
+        var size = new Vector2(ResultIconSize, ResultIconSize);
+        if (result.IconId == 0)
+        {
+            ImGui.Dummy(size);
+            return;
+        }
+
+        try
+        {
+            var lookup = new GameIconLookup(result.IconId, itemHq: false, hiRes: true);
+            var shared = Plugin.TextureProvider.GetFromGameIcon(lookup);
+            var wrap = shared.GetWrapOrEmpty();
+
+            var cursor = ImGui.GetCursorPos();
+            var available = ImGui.GetContentRegionAvail();
+            var offsetX = Math.Max(0f, (available.X - size.X) * 0.5f);
+            ImGui.SetCursorPosX(cursor.X + offsetX);
+            ImGui.Image(wrap.Handle, size);
+        }
+        catch
+        {
+            ImGui.Dummy(size);
+        }
     }
 
     private void DrawWorldPreferenceSection()
@@ -275,26 +365,21 @@ public class MainWindow : Window, IDisposable
         {
             ImGui.TextColored(new Vector4(0.9f, 0.35f, 0.35f, 1f), "Select at least one region.");
         }
+    }
 
-        var canRun = hasName && selectionValid;
-        if (!canRun) ImGui.BeginDisabled();
-
-        if (ImGui.Button("Find cheapest", new Vector2(PreferredWorldPopupButtonWidth + 40, 0)))
+    private void RunFindCheapest(IReadOnlyList<string> selectedRegions)
+    {
+        var scope = BuildCheapestLookupScope(selectedRegions);
+        if (plugin.TryBeginLookup(itemSearch, out var error, scope))
         {
-            var scope = BuildCheapestLookupScope(selectedRegions);
-            if (plugin.TryBeginLookup(itemSearch, out var error, scope))
-            {
-                searchFeedbackIsError = false;
-                searchFeedback = $"Searching '{itemSearch.Trim()}' in {DescribeScope(scope)}.";
-            }
-            else
-            {
-                searchFeedbackIsError = true;
-                searchFeedback = error;
-            }
+            searchFeedbackIsError = false;
+            searchFeedback = $"Searching '{itemSearch.Trim()}' in {DescribeScope(scope)}.";
         }
-
-        if (!canRun) ImGui.EndDisabled();
+        else
+        {
+            searchFeedbackIsError = true;
+            searchFeedback = error;
+        }
     }
 
     private void UpdatePreferredWorld(string rawValue, string? displayOverride = null)

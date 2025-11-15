@@ -41,7 +41,21 @@ public sealed class Plugin : IDalamudPlugin
     private readonly HttpClient http = new();
     private DateTime lastCall = DateTime.MinValue;
 
-    internal record MarketResult(string ItemName, string World, long Lowest, long LastUploadMs);
+    internal record MarketResult(
+        uint ItemId,
+        uint IconId,
+        string ItemName,
+        string World,
+        long Lowest,
+        long LastUploadMs,
+        int TotalListings,
+        int TotalListedQuantity,
+        MarketSale? LatestSale,
+        int DaySalesQuantity,
+        int DaySalesCount);
+
+    internal readonly record struct MarketSale(long PricePerUnit, int Quantity, long Timestamp);
+
     internal readonly List<MarketResult> History = new();
     internal MarketResult? LastResult { get; set; }
 
@@ -175,7 +189,8 @@ public sealed class Plugin : IDalamudPlugin
         lastCall = DateTime.UtcNow;
         var scope = scopeOverride ?? LookupScope.SpecificWorld;
 
-        _ = QueryMarketAsync(item.Value.RowId, item.Value.Name.ToString(), scope);
+        var iconId = (uint)item.Value.Icon;
+        _ = QueryMarketAsync(item.Value.RowId, item.Value.Name.ToString(), scope, iconId);
         MainWindow.IsOpen = true;
         return true;
     }
@@ -228,7 +243,8 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     private record UniversalisListing(long pricePerUnit, int quantity, string worldName);
-    private record UniversalisResp(long lastUploadTime, List<UniversalisListing> listings);
+    private record UniversalisHistory(long pricePerUnit, int quantity, long timestamp);
+    private record UniversalisResp(long lastUploadTime, List<UniversalisListing> listings, List<UniversalisHistory>? recentHistory);
 
     private void AddToHistory(MarketResult r) {
         History.RemoveAll(x =>
@@ -243,7 +259,7 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private async Task QueryMarketAsync(uint itemId, string itemName, LookupScope scope)
+    private async Task QueryMarketAsync(uint itemId, string itemName, LookupScope scope, uint iconId)
     {
         try
         {
@@ -254,7 +270,7 @@ public sealed class Plugin : IDalamudPlugin
 
             foreach (var target in targets)
             {
-                var result = await QueryMarketForTargetAsync(itemId, itemName, target);
+                var result = await QueryMarketForTargetAsync(itemId, itemName, iconId, target);
                 if (result is null)
                     continue;
 
@@ -281,9 +297,9 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private async Task<MarketResult?> QueryMarketForTargetAsync(uint itemId, string itemName, LookupTarget target)
+    private async Task<MarketResult?> QueryMarketForTargetAsync(uint itemId, string itemName, uint iconId, LookupTarget target)
     {
-        var url = $"https://universalis.app/api/v2/{Uri.EscapeDataString(target.Identifier)}/{itemId}?listings=10";
+        var url = $"https://universalis.app/api/v2/{Uri.EscapeDataString(target.Identifier)}/{itemId}?listings=100&entries=100";
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         req.Headers.UserAgent.ParseAdd("Dalamud-MarketQuickPrice/1.0");
 
@@ -302,7 +318,50 @@ public sealed class Plugin : IDalamudPlugin
             ? target.Label
             : $"{lowest.worldName} [{target.Label}]";
 
-        return new MarketResult(itemName, worldLabel, lowest.pricePerUnit, data.lastUploadTime);
+        var totalListings = data.listings.Count;
+        var totalQuantity = data.listings.Sum(l => l.quantity);
+
+        MarketSale? latestSale = null;
+        var daySalesQuantity = 0;
+        var daySalesCount = 0;
+        var cutoffSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 86_400;
+
+        if (data.recentHistory is { Count: > 0 })
+        {
+            long latestTimestamp = long.MinValue;
+            UniversalisHistory? mostRecent = null;
+
+            foreach (var entry in data.recentHistory)
+            {
+                if (entry.timestamp > latestTimestamp)
+                {
+                    latestTimestamp = entry.timestamp;
+                    mostRecent = entry;
+                }
+
+                if (entry.timestamp >= cutoffSeconds)
+                {
+                    daySalesQuantity += entry.quantity;
+                    daySalesCount++;
+                }
+            }
+
+            if (mostRecent is not null)
+                latestSale = new MarketSale(mostRecent.pricePerUnit, mostRecent.quantity, mostRecent.timestamp);
+        }
+
+        return new MarketResult(    
+            itemId,
+            iconId,
+            itemName,
+            worldLabel,
+            lowest.pricePerUnit,
+            data.lastUploadTime,
+            totalListings,
+            totalQuantity,
+            latestSale,
+            daySalesQuantity,
+            daySalesCount);
     }
 
     private IReadOnlyList<LookupTarget> BuildLookupTargets(LookupScope scope)
