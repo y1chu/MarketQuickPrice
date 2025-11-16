@@ -375,6 +375,7 @@ public sealed class Plugin : IDalamudPlugin
                 ? new[] { regionTarget }
                 : new[] { CreateWorldTarget(GetPreferredWorldName()) },
             LookupScopeKind.CustomRegions => BuildCustomRegionTargets(scope.CustomRegions),
+            LookupScopeKind.CustomWorlds => BuildCustomWorldTargets(scope.CustomWorlds),
             _ => new[] { CreateWorldTarget(GetPreferredWorldName()) }
         };
     }
@@ -394,6 +395,27 @@ public sealed class Plugin : IDalamudPlugin
                 continue;
 
             list.Add(CreateRegionTarget(region));
+        }
+
+        return list.Count > 0 ? list : new[] { CreateWorldTarget(GetPreferredWorldName()) };
+    }
+
+    private IReadOnlyList<LookupTarget> BuildCustomWorldTargets(IReadOnlyList<string>? worlds)
+    {
+        if (worlds is null || worlds.Count == 0)
+            return new[] { CreateWorldTarget(GetPreferredWorldName()) };
+
+        var list = new List<LookupTarget>();
+        foreach (var world in worlds)
+        {
+            var normalized = world?.Trim();
+            if (string.IsNullOrEmpty(normalized))
+                continue;
+
+            if (list.Any(t => string.Equals(t.Identifier, normalized, StringComparison.OrdinalIgnoreCase)))
+                continue;
+
+            list.Add(CreateWorldTarget(normalized));
         }
 
         return list.Count > 0 ? list : new[] { CreateWorldTarget(GetPreferredWorldName()) };

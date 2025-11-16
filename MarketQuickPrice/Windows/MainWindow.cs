@@ -18,6 +18,7 @@ public class MainWindow : Window, IDisposable
     private bool searchFeedbackIsError;
     private const int SearchInputMaxLength = 64;
     private string preferredWorld;
+    private readonly List<string> preferredWorldSelections;
     private const int PreferredWorldMaxLength = 32;
     private const float PreferredWorldInputWidth = 220f;
     private const float PreferredWorldButtonWidth = 110f;
@@ -43,6 +44,8 @@ public class MainWindow : Window, IDisposable
         this.plugin = plugin;
         worldPicker = new WorldPickerPopup(plugin.Configuration);
         preferredWorld = plugin.Configuration.DefaultWorld ?? string.Empty;
+        preferredWorldSelections = new List<string>(plugin.Configuration.PreferredWorldList ?? Array.Empty<string>());
+        NormalizePreferredWorldSelections();
         regionNames = WorldRegions.All.Select(r => r.Name).ToArray();
         customRegionSelection = new bool[regionNames.Length];
     }
@@ -52,11 +55,13 @@ public class MainWindow : Window, IDisposable
 
     private LookupScope BuildCheapestLookupScope(IReadOnlyList<string> selectedRegions)
     {
+        var selectedWorlds = GetSelectedPreferredWorlds();
         return (LookupScopeKind)cheapestScopeIndex switch
         {
             LookupScopeKind.CurrentDataCenter => LookupScope.CurrentDataCenter,
             LookupScopeKind.CurrentRegion => LookupScope.CurrentRegion,
             LookupScopeKind.CustomRegions => LookupScope.FromCustomRegions(selectedRegions),
+            LookupScopeKind.SpecificWorld when selectedWorlds.Count > 0 => LookupScope.FromCustomWorlds(selectedWorlds.ToArray()),
             _ => LookupScope.SpecificWorld
         };
     }
@@ -73,6 +78,86 @@ public class MainWindow : Window, IDisposable
         return result;
     }
 
+    private IReadOnlyList<string> GetSelectedPreferredWorlds()
+    {
+        var result = new List<string>();
+        var normalizedDefault = preferredWorld.Trim();
+        if (!string.IsNullOrEmpty(normalizedDefault))
+            result.Add(normalizedDefault);
+
+        foreach (var world in preferredWorldSelections)
+        {
+            if (!result.Any(w => string.Equals(w, world, StringComparison.OrdinalIgnoreCase)))
+                result.Add(world);
+        }
+
+        return result;
+    }
+
+    private void NormalizePreferredWorldSelections()
+    {
+        for (int i = preferredWorldSelections.Count - 1; i >= 0; i--)
+        {
+            var normalized = preferredWorldSelections[i]?.Trim() ?? string.Empty;
+            if (string.IsNullOrEmpty(normalized))
+            {
+                preferredWorldSelections.RemoveAt(i);
+                continue;
+            }
+
+            preferredWorldSelections[i] = normalized;
+        }
+
+        var deduped = preferredWorldSelections
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        preferredWorldSelections.Clear();
+        preferredWorldSelections.AddRange(deduped);
+    }
+
+    private void PersistPreferredWorldSelections()
+    {
+        plugin.Configuration.PreferredWorldList = preferredWorldSelections.ToArray();
+        plugin.Configuration.Save();
+    }
+
+    private void SetPreferredWorldSelections(IEnumerable<string> worlds)
+    {
+        preferredWorldSelections.Clear();
+        foreach (var world in worlds)
+        {
+            var normalized = world?.Trim();
+            if (string.IsNullOrEmpty(normalized))
+                continue;
+
+            if (!string.IsNullOrEmpty(preferredWorld) &&
+                string.Equals(normalized, preferredWorld, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (preferredWorldSelections.Any(w => string.Equals(w, normalized, StringComparison.OrdinalIgnoreCase)))
+                continue;
+
+            preferredWorldSelections.Add(normalized);
+        }
+
+        PersistPreferredWorldSelections();
+    }
+
+    private void RemovePreferredWorldSelectionAt(int index)
+    {
+        if (index < 0 || index >= preferredWorldSelections.Count)
+            return;
+
+        preferredWorldSelections.RemoveAt(index);
+        PersistPreferredWorldSelections();
+    }
+
+    private void ApplyPreferredWorldSelection(IReadOnlyList<string> worlds)
+    {
+        SetPreferredWorldSelections(worlds);
+    }
+
     private string DescribeScope(LookupScope scope)
     {
         return scope.Kind switch
@@ -81,6 +166,8 @@ public class MainWindow : Window, IDisposable
             LookupScopeKind.CurrentRegion => "your current region",
             LookupScopeKind.CustomRegions when scope.CustomRegions is { Count: > 0 }
                 => $"regions: {string.Join(", ", scope.CustomRegions)}",
+            LookupScopeKind.CustomWorlds when scope.CustomWorlds is { Count: > 0 }
+                => $"worlds: {string.Join(", ", scope.CustomWorlds)}",
             _ => "your preferred world"
         };
     }
@@ -112,9 +199,15 @@ public class MainWindow : Window, IDisposable
         triggered |= submitted;
 
         var selectedRegions = GetSelectedCustomRegions();
+        var selectedWorlds = GetSelectedPreferredWorlds();
         var scopeKind = (LookupScopeKind)cheapestScopeIndex;
         var hasName = !string.IsNullOrWhiteSpace(itemSearch);
-        var selectionValid = scopeKind != LookupScopeKind.CustomRegions || selectedRegions.Count > 0;
+        var selectionValid = scopeKind switch
+        {
+            LookupScopeKind.CustomRegions => selectedRegions.Count > 0,
+            LookupScopeKind.SpecificWorld => selectedWorlds.Count > 0,
+            _ => true
+        };
         var canRunCheapest = hasName && selectionValid;
 
         ImGui.SameLine();
@@ -146,13 +239,11 @@ public class MainWindow : Window, IDisposable
             ImGui.TextColored(color, searchFeedback);
         }
 
-        ImGui.Spacing();
-        DrawWorldPreferenceSection();
-        ImGui.Spacing();
-        DrawFindCheapestSection();
+        DrawFindCheapestSection(selectedRegions, selectedWorlds);
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
+        DrawWorldPickers();
 
         if (plugin.History.Count > 0)
         {
@@ -317,7 +408,8 @@ public class MainWindow : Window, IDisposable
         ImGui.SameLine(0, 6);
         if (ImGui.Button("Choose from list", new Vector2(PreferredWorldPopupButtonWidth, 0)))
         {
-            worldPicker.Open();
+            var selections = GetSelectedPreferredWorlds();
+            worldPicker.Open(preferredWorld, selections, world => UpdatePreferredWorld(world), ApplyPreferredWorldSelection);
         }
 
         var storedWorld = plugin.Configuration.DefaultWorld ?? string.Empty;
@@ -325,11 +417,43 @@ public class MainWindow : Window, IDisposable
             ? "Using current character world"
             : $"Using: {storedWorld}";
         ImGui.TextUnformatted(current);
-
-        worldPicker.Draw(preferredWorld, world => UpdatePreferredWorld(world));
     }
 
-    private void DrawFindCheapestSection()
+    private void DrawPreferredWorldSelectionPanel()
+    {
+        DrawWorldPreferenceSection();
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Additional preferred worlds");
+
+        if (preferredWorldSelections.Count == 0)
+        {
+            ImGui.TextDisabled("No additional worlds selected.");
+        }
+        else
+        {
+            for (int i = 0; i < preferredWorldSelections.Count; i++)
+            {
+                var world = preferredWorldSelections[i];
+                ImGui.PushID($"pref_world_{i}");
+                ImGui.TextUnformatted(world);
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Remove"))
+                {
+                    RemovePreferredWorldSelectionAt(i);
+                    ImGui.PopID();
+                    i--;
+                    continue;
+                }
+                ImGui.PopID();
+            }
+        }
+        ImGui.TextDisabled("Use \"Choose from list\" to update the selections.");
+    }
+
+    private void DrawWorldPickers()
+        => worldPicker.Draw();
+
+    private void DrawFindCheapestSection(IReadOnlyList<string> selectedRegions, IReadOnlyList<string> selectedWorlds)
     {
         ImGui.TextUnformatted("Find cheapest in:");
         var currentScope = cheapestScopeIndex;
@@ -337,6 +461,9 @@ public class MainWindow : Window, IDisposable
             cheapestScopeIndex = currentScope;
 
         if (ImGui.RadioButton("Current region", ref currentScope, (int)LookupScopeKind.CurrentRegion))
+            cheapestScopeIndex = currentScope;
+
+        if (ImGui.RadioButton("Preferred world", ref currentScope, (int)LookupScopeKind.SpecificWorld))
             cheapestScopeIndex = currentScope;
 
         if (ImGui.RadioButton("Selected regions", ref currentScope, (int)LookupScopeKind.CustomRegions))
@@ -351,11 +478,21 @@ public class MainWindow : Window, IDisposable
             }
             ImGui.Unindent();
         }
+        else if ((LookupScopeKind)cheapestScopeIndex == LookupScopeKind.SpecificWorld)
+        {
+            ImGui.Indent();
+            DrawPreferredWorldSelectionPanel();
+            ImGui.Unindent();
+        }
 
         var hasName = !string.IsNullOrWhiteSpace(itemSearch);
-        var selectedRegions = GetSelectedCustomRegions();
         var scopeKind = (LookupScopeKind)cheapestScopeIndex;
-        var selectionValid = scopeKind != LookupScopeKind.CustomRegions || selectedRegions.Count > 0;
+        var selectionValid = scopeKind switch
+        {
+            LookupScopeKind.CustomRegions => selectedRegions.Count > 0,
+            LookupScopeKind.SpecificWorld => selectedWorlds.Count > 0,
+            _ => true
+        };
 
         if (!hasName)
         {
@@ -363,7 +500,10 @@ public class MainWindow : Window, IDisposable
         }
         else if (!selectionValid)
         {
-            ImGui.TextColored(new Vector4(0.9f, 0.35f, 0.35f, 1f), "Select at least one region.");
+            var warning = scopeKind == LookupScopeKind.CustomRegions
+                ? "Select at least one region."
+                : "Select at least one world.";
+            ImGui.TextColored(new Vector4(0.9f, 0.35f, 0.35f, 1f), warning);
         }
     }
 
@@ -388,6 +528,10 @@ public class MainWindow : Window, IDisposable
         var displayValue = displayOverride ?? normalized;
         if (!string.Equals(preferredWorld, displayValue, StringComparison.Ordinal))
             preferredWorld = displayValue;
+
+        var removed = preferredWorldSelections.RemoveAll(w => string.Equals(w, preferredWorld, StringComparison.OrdinalIgnoreCase));
+        if (removed > 0)
+            PersistPreferredWorldSelections();
 
         if (string.Equals(plugin.Configuration.DefaultWorld ?? string.Empty, normalized, StringComparison.Ordinal))
             return;

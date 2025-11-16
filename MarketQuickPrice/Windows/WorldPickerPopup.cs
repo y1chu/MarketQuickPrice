@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Linq;
 using Dalamud.Bindings.ImGui;
 using MarketQuickPrice.Data;
 
@@ -13,7 +14,7 @@ public sealed class WorldPickerPopup
     private readonly string popupId;
 
     private const int WorldColumns = 3;
-    private const float ButtonWidth = 120f;
+    private const float ButtonWidth = 140f;
     private const float ButtonSpacing = 6f;
 
     private bool isOpen;
@@ -37,9 +38,39 @@ public sealed class WorldPickerPopup
     private static Vector2 ResolveWindowSize(Vector2 stored, Vector2 fallback)
         => stored.X > 0 && stored.Y > 0 ? stored : fallback;
 
-    public void Open() => isOpen = true;
+    private string currentPreferredWorld = string.Empty;
+    private readonly List<string> multiSelection = new();
+    private readonly HashSet<string> multiSelectionLookup = new(StringComparer.OrdinalIgnoreCase);
+    private Action<string>? onPreferredWorldChosen;
+    private Action<IReadOnlyList<string>>? onMultiSelectionApplied;
+    private bool selectionDirty;
 
-    public void Draw(string selectedWorld, Action<string> onWorldChosen)
+    public void Open(string preferredWorld, IReadOnlyList<string> selectedWorlds, Action<string> onPreferredWorldChosen, Action<IReadOnlyList<string>> onMultiSelectionApplied)
+    {
+        currentPreferredWorld = preferredWorld?.Trim() ?? string.Empty;
+        this.onPreferredWorldChosen = onPreferredWorldChosen;
+        this.onMultiSelectionApplied = onMultiSelectionApplied;
+
+        multiSelection.Clear();
+        multiSelectionLookup.Clear();
+        if (selectedWorlds is { Count: > 0 })
+        {
+            foreach (var world in selectedWorlds)
+            {
+                var normalized = world?.Trim();
+                if (string.IsNullOrEmpty(normalized))
+                    continue;
+
+                if (multiSelectionLookup.Add(normalized))
+                    multiSelection.Add(normalized);
+            }
+        }
+
+        selectionDirty = false;
+        isOpen = true;
+    }
+
+    public void Draw()
     {
         if (!isOpen)
             return;
@@ -58,7 +89,7 @@ public sealed class WorldPickerPopup
         windowSize = ImGui.GetWindowSize();
         TrackWindowSizeChange();
 
-        ImGui.TextUnformatted("Select a world");
+        ImGui.TextWrapped("Click a world name to set your preferred world. Use the checkboxes to include worlds when searching.");
         ImGui.Separator();
 
         var childHeight = ImGui.GetContentRegionAvail().Y - ImGui.GetFrameHeightWithSpacing() * 2;
@@ -78,7 +109,7 @@ public sealed class WorldPickerPopup
                     ImGui.PushID($"{region.Name}_{dataCenter.Name}");
                     ImGui.TextColored(new Vector4(0.75f, 0.85f, 1f, 1f), $"{dataCenter.Name} Data Center");
                     ImGui.Indent();
-                    DrawWorldButtons(dataCenter.Worlds, selectedWorld, onWorldChosen);
+                    DrawWorldButtons(dataCenter.Worlds);
                     ImGui.Unindent();
                     ImGui.Spacing();
                     ImGui.PopID();
@@ -87,22 +118,24 @@ public sealed class WorldPickerPopup
         }
         ImGui.EndChild();
 
-        if (ImGui.Button("Clear selection"))
+        if (ImGui.Button("Apply selection"))
+            ApplyMultiSelection(true);
+
+        ImGui.SameLine();
+        if (ImGui.Button("Close"))
         {
-            onWorldChosen(string.Empty);
+            ApplyMultiSelection(true);
             isOpen = false;
         }
 
-        ImGui.SameLine();
-
-        if (ImGui.Button("Close"))
-            isOpen = false;
-
         ImGui.End();
         SaveWindowSizeIfNeeded(!isOpen);
+
+        if (!isOpen && selectionDirty)
+            ApplyMultiSelection(true);
     }
 
-    private void DrawWorldButtons(IReadOnlyList<string> worlds, string selectedWorld, Action<string> onWorldChosen)
+    private void DrawWorldButtons(IReadOnlyList<string> worlds)
     {
         for (int i = 0; i < worlds.Count; i++)
         {
@@ -110,25 +143,51 @@ public sealed class WorldPickerPopup
                 ImGui.SameLine(0, ButtonSpacing);
 
             var worldName = worlds[i];
-            var isSelected = !string.IsNullOrWhiteSpace(selectedWorld) &&
-                string.Equals(worldName, selectedWorld, StringComparison.OrdinalIgnoreCase);
+            ImGui.PushID(worldName);
+            ImGui.BeginGroup();
 
-            if (isSelected)
+            var included = multiSelectionLookup.Contains(worldName);
+            if (ImGui.Checkbox("##mqp_world_select", ref included))
+                ToggleSelection(worldName, included);
+
+            var label = string.Equals(worldName, currentPreferredWorld, StringComparison.OrdinalIgnoreCase)
+                ? $"{worldName} (preferred)"
+                : worldName;
+
+            if (ImGui.Button(label, new Vector2(ButtonWidth, 0)))
             {
-                ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.33f, 0.6f, 0.33f, 1f));
-                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.38f, 0.7f, 0.38f, 1f));
-                ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.28f, 0.55f, 0.28f, 1f));
+                currentPreferredWorld = worldName;
+                onPreferredWorldChosen?.Invoke(worldName);
             }
 
-            if (ImGui.Button(worldName, new Vector2(ButtonWidth, 0)))
-            {
-                onWorldChosen(worldName);
-                isOpen = false;
-            }
-
-            if (isSelected)
-                ImGui.PopStyleColor(3);
+            ImGui.EndGroup();
+            ImGui.PopID();
         }
+    }
+
+    private void ToggleSelection(string worldName, bool include)
+    {
+        if (include)
+        {
+            if (multiSelectionLookup.Add(worldName))
+                multiSelection.Add(worldName);
+        }
+        else
+        {
+            if (multiSelectionLookup.Remove(worldName))
+                multiSelection.RemoveAll(w => string.Equals(w, worldName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        selectionDirty = true;
+    }
+
+    private void ApplyMultiSelection(bool force = false)
+    {
+        if ((!force && !selectionDirty) || onMultiSelectionApplied is null)
+            return;
+
+        onMultiSelectionApplied(multiSelection.ToList());
+        selectionDirty = false;
     }
 
     private void TrackWindowSizeChange()

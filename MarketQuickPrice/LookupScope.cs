@@ -8,9 +8,13 @@ internal enum LookupScopeKind
     CurrentDataCenter,
     CurrentRegion,
     CustomRegions,
+    CustomWorlds,
 }
 
-internal readonly record struct LookupScope(LookupScopeKind Kind, IReadOnlyList<string>? CustomRegions = null)
+internal readonly record struct LookupScope(
+    LookupScopeKind Kind,
+    IReadOnlyList<string>? CustomRegions = null,
+    IReadOnlyList<string>? CustomWorlds = null)
 {
     public static LookupScope SpecificWorld { get; } = new(LookupScopeKind.SpecificWorld);
 
@@ -20,4 +24,7 @@ internal readonly record struct LookupScope(LookupScopeKind Kind, IReadOnlyList<
 
     public static LookupScope FromCustomRegions(IReadOnlyList<string> regions)
         => new(LookupScopeKind.CustomRegions, regions);
+
+    public static LookupScope FromCustomWorlds(IReadOnlyList<string> worlds)
+        => new(LookupScopeKind.CustomWorlds, null, worlds);
 }

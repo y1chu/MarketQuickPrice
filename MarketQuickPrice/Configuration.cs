@@ -13,6 +13,7 @@ public class Configuration : IPluginConfiguration
     public Vector2 MainWindowSize { get; set; } = new(380, 160);
     public Vector2 ConfigWindowSize { get; set; } = new(420, 160);
     public Vector2 WorldPickerSize { get; set; } = new(480, 380);
+    public string[] PreferredWorldList { get; set; } = Array.Empty<string>();
 
     public void Save()
     {
